@@ -1,0 +1,4 @@
+funding_calls.db
+config.yaml
+__pycache__/
+*.pyc
