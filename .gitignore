@@ -16,6 +16,10 @@ funding_calls.db
 config.yaml
 .env
 .streamlit/secrets.toml
+DATABASE_URL.txt
+
+# Local automation files
+run_weekly.bat
 
 # OS / editor
 .DS_Store

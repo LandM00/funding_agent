@@ -1,4 +1,6 @@
 import json
+from datetime import datetime
+
 import pandas as pd
 import streamlit as st
 
@@ -9,14 +11,74 @@ from funding_agent.rules.visibility import should_show_call
 from funding_agent.classifiers.call_evaluator import evaluate_call
 
 
+# ---------------------------------------------------------------------
+# AUTH
+# ---------------------------------------------------------------------
+def get_secret_value(key: str, default=None):
+    try:
+        value = st.secrets.get(key, default)
+        return value
+    except Exception:
+        return default
+
+
+def check_password() -> bool:
+    """
+    Login semplice per proteggere la dashboard online.
+    In locale/cloud legge APP_PASSWORD da Streamlit secrets.
+    """
+    expected_password = get_secret_value("APP_PASSWORD", "")
+
+    # Se non è impostata APP_PASSWORD, blocchiamo l'accesso in modo esplicito.
+    if not expected_password:
+        st.error(
+            "APP_PASSWORD non configurata. Imposta una password nei secrets "
+            "prima di pubblicare la dashboard."
+        )
+        return False
+
+    if "authenticated" not in st.session_state:
+        st.session_state["authenticated"] = False
+
+    if st.session_state["authenticated"]:
+        return True
+
+    st.title("Funding Agent")
+    st.subheader("Accesso riservato")
+    st.caption("Dashboard privata per il monitoraggio delle opportunità di finanziamento NEX / Neura GrowTech.")
+
+    password = st.text_input("Password", type="password")
+
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        login_clicked = st.button("Accedi", use_container_width=True)
+
+    if login_clicked:
+        if password == expected_password:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Password non corretta.")
+
+    return False
+
+
+# ---------------------------------------------------------------------
+# UTILS
+# ---------------------------------------------------------------------
 def row_value(row, key: str, default=""):
     try:
-        if key in row.keys():
+        if hasattr(row, "keys") and key in row.keys():
             value = row[key]
             return value if value is not None else default
     except Exception:
         pass
-    return default
+
+    try:
+        value = row.get(key, default)
+        return value if value is not None else default
+    except Exception:
+        return default
 
 
 def safe_json_list(value):
@@ -52,9 +114,19 @@ def row_to_call(row) -> FundingCall:
     )
 
 
-@st.cache_data(ttl=300)
+def is_postgres_config(config: dict) -> bool:
+    db_path = str(config.get("database", {}).get("path", ""))
+    backend = str(config.get("database", {}).get("backend", ""))
+    return backend == "postgres" or db_path.startswith("postgres")
+
+
+# ---------------------------------------------------------------------
+# DATA LOADING
+# ---------------------------------------------------------------------
+@st.cache_data(ttl=300, show_spinner=False)
 def load_calls():
     config = load_config("config.yaml")
+
     db = FundingDB(config["database"]["path"])
     rows = db.get_all_real_calls()
     db.close()
@@ -65,9 +137,14 @@ def load_calls():
         if should_show_call(call):
             visible.append(dict(row))
 
-    return visible, config
+    loaded_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+    return visible, config, loaded_at
 
 
+# ---------------------------------------------------------------------
+# LABELS
+# ---------------------------------------------------------------------
 def fit_label(score: float) -> str:
     if score >= 8.0:
         return "🔥 ALTO FIT"
@@ -99,12 +176,14 @@ def decision_label(decision: str) -> str:
     return mapping.get(decision, decision or "N/D")
 
 
+# ---------------------------------------------------------------------
+# DATAFRAME
+# ---------------------------------------------------------------------
 def build_dataframe(rows, config):
     records = []
 
     for row in rows:
         call = row_to_call(row)
-
         evaluation = evaluate_call(call, config)
         fit = evaluation["fit"]
 
@@ -168,6 +247,9 @@ def build_dataframe(rows, config):
     return df
 
 
+# ---------------------------------------------------------------------
+# RENDER
+# ---------------------------------------------------------------------
 def render_metrics(df):
     total = len(df)
     high = len(df[df["PriorityRaw"] == "HIGH"])
@@ -197,31 +279,28 @@ def render_fit_breakdown(row):
     c6.metric("Timing", row["Timing score"])
 
 
-def main():
-    st.set_page_config(page_title="Funding Agent", layout="wide")
+def render_sidebar_status(config: dict, loaded_at: str, df: pd.DataFrame):
+    st.sidebar.header("Stato sistema")
 
-    st.title("Funding Agent Dashboard")
-    st.caption("Call aperte o in apertura entro 6 mesi — ranking decisionale per NEX / Neura GrowTech")
+    if is_postgres_config(config):
+        st.sidebar.success("Database: Supabase/PostgreSQL")
+    else:
+        st.sidebar.warning("Database: SQLite locale")
 
-    rows, config = load_calls()
+    st.sidebar.caption(f"Ultimo caricamento dashboard: {loaded_at}")
+    st.sidebar.caption(f"Record visibili: {len(df)}")
 
-    if not rows:
-        st.warning("Nessuna call valida trovata.")
-        return
-
-    df = build_dataframe(rows, config)
-
-    if df.empty:
-        st.warning("Nessuna call disponibile.")
-        return
-
-    render_metrics(df)
-
-    st.sidebar.header("Filtri")
-
-    if st.sidebar.button("Aggiorna dati"):
+    if st.sidebar.button("Aggiorna vista"):
         st.cache_data.clear()
         st.rerun()
+
+    if st.sidebar.button("Logout"):
+        st.session_state["authenticated"] = False
+        st.rerun()
+
+
+def render_filters(df):
+    st.sidebar.header("Filtri")
 
     min_score = st.sidebar.slider("Score minimo", 0.0, 10.0, 0.0, 0.5)
 
@@ -265,42 +344,11 @@ def main():
             | filtered["Next Action"].str.lower().str.contains(k, na=False)
         ]
 
-    st.subheader("Call disponibili")
+    return filtered
 
-    if filtered.empty:
-        st.info("Nessuna call corrisponde ai filtri.")
-        return
 
-    st.dataframe(
-        filtered[
-            [
-                "Titolo",
-                "Fonte",
-                "Score",
-                "Fit",
-                "Decision",
-                "Priority",
-                "Timing",
-                "Opportunity type",
-                "NEX match",
-                "Scadenza",
-            ]
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    st.subheader("Dettaglio")
-
-    options = [
-        f"{row['Titolo']} | {row['Fonte']} | {row['Decision']} | score={row['Score']}"
-        for _, row in filtered.iterrows()
-    ]
-
-    selected_option = st.selectbox("Seleziona call", options)
-    selected_index = options.index(selected_option)
-    row = filtered.iloc[selected_index]
-
+def render_detail(row):
+    st.subheader("Dettaglio call")
     st.markdown(f"### {row['Titolo']}")
 
     top1, top2, top3, top4 = st.columns(4)
@@ -323,7 +371,8 @@ def main():
             st.markdown("#### Sintesi")
             st.write(row["Summary"])
 
-        st.markdown(f"[Apri call]({row['URL']})")
+        if row["URL"]:
+            st.markdown(f"[Apri call ufficiale]({row['URL']})")
 
     with col2:
         st.write(f"**Timing:** {row['Timing']}")
@@ -331,7 +380,7 @@ def main():
         st.write(f"**Apertura:** {row['Apertura'] or 'N/D'}")
         st.write(f"**Scadenza:** {row['Scadenza'] or 'N/D'}")
 
-    st.markdown("#### Next action")
+    st.markdown("#### Azione consigliata")
     st.info(row["Next Action"])
 
     render_fit_breakdown(row)
@@ -343,6 +392,82 @@ def main():
                 st.write(f"- {reason.strip()}")
     else:
         st.write("Nessuna motivazione disponibile.")
+
+
+# ---------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------
+def main():
+    st.set_page_config(page_title="Funding Agent", layout="wide")
+
+    if not check_password():
+        return
+
+    st.title("Funding Agent Dashboard")
+    st.caption(
+        "Call aperte o in apertura entro 6 mesi — ranking decisionale per NEX / Neura GrowTech"
+    )
+
+    try:
+        rows, config, loaded_at = load_calls()
+    except Exception as e:
+        st.error("Errore durante il caricamento dei dati.")
+        st.exception(e)
+        st.stop()
+
+    if not rows:
+        st.warning(
+            "Nessuna call valida trovata. Verifica che il database cloud sia configurato "
+            "e che il workflow di aggiornamento abbia eseguito almeno un crawl."
+        )
+        st.stop()
+
+    df = build_dataframe(rows, config)
+
+    if df.empty:
+        st.warning("Nessuna call disponibile dopo la valutazione.")
+        st.stop()
+
+    render_sidebar_status(config, loaded_at, df)
+    render_metrics(df)
+
+    filtered = render_filters(df)
+
+    st.subheader("Call disponibili")
+
+    if filtered.empty:
+        st.info("Nessuna call corrisponde ai filtri selezionati.")
+        st.stop()
+
+    st.dataframe(
+        filtered[
+            [
+                "Titolo",
+                "Fonte",
+                "Score",
+                "Fit",
+                "Decision",
+                "Priority",
+                "Timing",
+                "Opportunity type",
+                "NEX match",
+                "Scadenza",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    options = [
+        f"{row['Titolo']} | {row['Fonte']} | {row['Decision']} | score={row['Score']}"
+        for _, row in filtered.iterrows()
+    ]
+
+    selected_option = st.selectbox("Seleziona una call da analizzare", options)
+    selected_index = options.index(selected_option)
+    selected_row = filtered.iloc[selected_index]
+
+    render_detail(selected_row)
 
     csv_data = filtered.drop(
         columns=["_priority_order", "_decision_order"],
