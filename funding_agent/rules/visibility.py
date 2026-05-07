@@ -8,8 +8,26 @@ from dateutil import parser
 from funding_agent.models import FundingCall
 
 
-TODAY = date.today()
 OPENING_WINDOW_DAYS = 183  # circa 6 mesi
+
+IT_MONTHS = {
+    "gennaio": "january",
+    "febbraio": "february",
+    "marzo": "march",
+    "aprile": "april",
+    "maggio": "may",
+    "giugno": "june",
+    "luglio": "july",
+    "agosto": "august",
+    "settembre": "september",
+    "ottobre": "october",
+    "novembre": "november",
+    "dicembre": "december",
+}
+
+
+def _today() -> date:
+    return date.today()
 
 
 def _parse_date(value: Optional[str]) -> Optional[date]:
@@ -18,11 +36,14 @@ def _parse_date(value: Optional[str]) -> Optional[date]:
 
     raw = value.strip().lower()
 
-    if raw in {"sportello_aperto", "open", "open_section", "open"}:
+    if raw in {"sportello_aperto", "open", "open_section"}:
         return None
 
+    for it_month, en_month in IT_MONTHS.items():
+        raw = raw.replace(it_month, en_month)
+
     try:
-        parsed = parser.parse(value, dayfirst=True, fuzzy=True)
+        parsed = parser.parse(raw, dayfirst=True, fuzzy=True)
         return parsed.date()
     except Exception:
         return None
@@ -35,7 +56,8 @@ def is_open_call(call: FundingCall) -> bool:
         return True
 
     parsed_deadline = _parse_date(call.deadline_date)
-    if parsed_deadline and parsed_deadline >= TODAY:
+
+    if parsed_deadline and parsed_deadline >= _today():
         return True
 
     return False
@@ -43,13 +65,16 @@ def is_open_call(call: FundingCall) -> bool:
 
 def is_opening_within_six_months(call: FundingCall) -> bool:
     parsed_opening = _parse_date(call.opening_date)
+
     if not parsed_opening:
         return False
 
-    if parsed_opening < TODAY:
+    today = _today()
+
+    if parsed_opening < today:
         return False
 
-    return parsed_opening <= TODAY + timedelta(days=OPENING_WINDOW_DAYS)
+    return parsed_opening <= today + timedelta(days=OPENING_WINDOW_DAYS)
 
 
 def should_show_call(call: FundingCall) -> bool:
