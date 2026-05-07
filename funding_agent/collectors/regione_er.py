@@ -1,9 +1,11 @@
 import re
+import time
 from typing import List, Optional
 from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 from funding_agent.collectors.base import BaseCollector
 from funding_agent.models import FundingCall
@@ -15,8 +17,9 @@ class RegioneERCollector(BaseCollector):
     HUB_URL = "https://agricoltura.regione.emilia-romagna.it/sviluppo-rurale-23-27/opportunita/bandi"
     BASE_URL = "https://agricoltura.regione.emilia-romagna.it"
 
-    def __init__(self, timeout: int = 20):
+    def __init__(self, timeout: int = 25, retries: int = 3):
         self.timeout = timeout
+        self.retries = retries
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -24,7 +27,10 @@ class RegioneERCollector(BaseCollector):
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/124.0 Safari/537.36"
-                )
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
+                "Connection": "keep-alive",
             }
         )
 
@@ -34,101 +40,120 @@ class RegioneERCollector(BaseCollector):
             return []
 
         hub_soup = BeautifulSoup(hub_html, "html.parser")
-        hub_text = self._extract_main_text(hub_soup)
-
         bandi_in_corso_url = self._find_bandi_in_corso_url(hub_soup)
 
-        if bandi_in_corso_url:
-            calls = self._fetch_bandi_in_corso(bandi_in_corso_url)
-            if calls:
-                return calls
+        if not bandi_in_corso_url:
+            print("[RegioneERCollector] URL 'bandi in corso' non trovato.")
+            return []
 
-        hub_call = FundingCall(
-            source="Regione Emilia-Romagna",
-            source_url=self.HUB_URL,
-            call_id="RER-BANDI-HUB",
-            title="Bandi - Sviluppo rurale 2023-2027",
-            summary=self._build_summary(hub_text),
-            program="Sviluppo rurale 2023-2027",
-            opening_date=None,
-            deadline_date=None,
-            budget_total=None,
-            funding_type="bando / hub informativo",
-            record_type="hub",
-            eligible_entities=["aziende agricole", "beneficiari sviluppo rurale"],
-            countries=["Italy"],
-            topics=self._infer_topics(hub_text, "Bandi - Sviluppo rurale 2023-2027"),
-            raw_text=hub_text,
-        )
-        return [hub_call]
+        return self._fetch_bandi_in_corso(bandi_in_corso_url)
 
     def _fetch_bandi_in_corso(self, url: str) -> List[FundingCall]:
-        html = self._safe_get(url)
+        html = self._get_dynamic_html(url)
         if not html:
             return []
 
         soup = BeautifulSoup(html, "html.parser")
         links = soup.find_all("a", href=True)
 
-        results = []
+        results: List[FundingCall] = []
         seen = set()
 
         for a in links:
             href = a["href"].strip()
-            text = a.get_text(" ", strip=True)
+            anchor_text = a.get_text(" ", strip=True)
             full_url = urljoin(self.BASE_URL, href)
-
-            if not self._is_candidate_call_link(full_url, text):
-                continue
+            lowered_url = full_url.lower()
 
             if full_url in seen:
                 continue
-
             seen.add(full_url)
+
+            if not self._is_real_bando_url(lowered_url, anchor_text):
+                continue
+
+            print(f"[RER BANDO] {anchor_text} -> {full_url}")
 
             detail_html = self._safe_get(full_url)
             if not detail_html:
+                print(f"[RER SKIP] dettaglio non scaricato: {anchor_text}")
                 continue
 
             detail_soup = BeautifulSoup(detail_html, "html.parser")
-            detail_title = self._extract_title(detail_soup) or text
-            detail_text = self._extract_main_text(detail_soup)
+            title = self._extract_title(detail_soup) or anchor_text
+            text = self._extract_main_text(detail_soup)
 
-            if not self._looks_like_real_call_page(full_url, detail_title, detail_text):
+            if len(text) < 300:
+                print(f"[RER SKIP] testo troppo corto ({len(text)}): {anchor_text}")
+                continue
+
+            if not self._looks_like_real_call_page(full_url, title, text):
+                if not self._has_bando_code(full_url, title, anchor_text):
+                    print(f"[RER SKIP] non sembra bando reale: {anchor_text}")
+                    continue
+
+            deadline = self._extract_deadline(text, title, full_url)
+
+            if not deadline:
+                deadline = "open"
+
+            if deadline == "closed":
                 continue
 
             call = FundingCall(
                 source="Regione Emilia-Romagna",
                 source_url=full_url,
                 call_id=self._build_call_id(full_url),
-                title=detail_title,
-                summary=self._build_summary(detail_text),
+                title=self._clean_title(title),
+                summary=self._build_summary(text),
                 program="Sviluppo rurale 2023-2027",
                 opening_date=None,
-                deadline_date=self._extract_deadline(detail_text, detail_title, full_url),
-                budget_total=None,
-                funding_type="bando",
+                deadline_date=deadline,
+                budget_total=self._extract_budget(text),
+                funding_type="bando regionale",
                 record_type="call",
-                eligible_entities=["aziende agricole", "beneficiari sviluppo rurale"],
+                eligible_entities=[
+                    "aziende agricole",
+                    "beneficiari sviluppo rurale",
+                ],
                 countries=["Italy"],
-                topics=self._infer_topics(detail_text, detail_title),
-                raw_text=detail_text,
+                topics=self._infer_topics(text, title),
+                raw_text=text,
             )
+
             results.append(call)
 
-        return results
+        return self._deduplicate(results)
+
+    def _get_dynamic_html(self, url: str) -> Optional[str]:
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page()
+
+                print(f"[RER] Opening dynamic page: {url}")
+                page.goto(url, timeout=60000, wait_until="networkidle")
+                page.wait_for_timeout(2500)
+
+                html = page.content()
+                browser.close()
+                return html
+
+        except Exception as e:
+            print(f"[RegioneERCollector] Playwright error su {url}: {e}")
+            return None
 
     def _find_bandi_in_corso_url(self, soup: BeautifulSoup) -> Optional[str]:
         for a in soup.find_all("a", href=True):
             text = a.get_text(" ", strip=True).lower()
             href = a["href"].strip()
-            full_url = urljoin(self.BASE_URL, href).lower()
+            full_url = urljoin(self.BASE_URL, href)
 
             if "bandi in corso" in text:
-                return urljoin(self.BASE_URL, href)
+                return full_url
 
-            if "/bandi/bandi-in-corso" in full_url:
-                return urljoin(self.BASE_URL, href)
+            if "/bandi/bandi-in-corso" in full_url.lower():
+                return full_url
 
         return None
 
@@ -144,17 +169,72 @@ class RegioneERCollector(BaseCollector):
             "x.com",
             "mailto:",
             "javascript:",
+            "tel:",
         ]
+
         if any(b in lowered for b in blocked):
             return None
 
-        try:
-            response = self.session.get(url, timeout=self.timeout)
-            response.raise_for_status()
-            return response.text
-        except requests.RequestException as e:
-            print(f"[RegioneERCollector] Errore su {url}: {e}")
-            return None
+        for attempt in range(1, self.retries + 1):
+            try:
+                response = self.session.get(url, timeout=self.timeout)
+                response.raise_for_status()
+                return response.text
+
+            except requests.RequestException as e:
+                if attempt == self.retries:
+                    print(f"[RegioneERCollector] Errore su {url}: {e}")
+                    return None
+
+                time.sleep(1.5 * attempt)
+
+        return None
+
+    def _is_real_bando_url(self, lowered_url: str, anchor_text: str) -> bool:
+        text = (anchor_text or "").lower()
+
+        if "agricoltura.regione.emilia-romagna.it" not in lowered_url:
+            return False
+
+        if "/sviluppo-rurale-23-27/opportunita/bandi/" not in lowered_url:
+            return False
+
+        excluded = [
+            "bandi-in-corso",
+            "bandi-chiusi",
+            "bandi-gal",
+            "facebook.com",
+            "linkedin.com",
+            "whatsapp",
+            "telegram",
+            "mailto:",
+            "newsletter",
+            "privacy",
+            "cookie",
+            "accessibilita",
+            "info",
+        ]
+
+        if any(x in lowered_url for x in excluded):
+            return False
+
+        if len(text) < 8:
+            return False
+
+        positive_patterns = [
+            "/srd",
+            "/sra",
+            "/srg",
+            "/srh",
+            "/sre",
+            "investimenti",
+            "intervento",
+            "sostegno",
+            "contributi",
+            "domande",
+        ]
+
+        return any(p in lowered_url or p in text for p in positive_patterns)
 
     def _extract_title(self, soup: BeautifulSoup) -> str:
         h1 = soup.find("h1")
@@ -174,6 +254,7 @@ class RegioneERCollector(BaseCollector):
             ".content",
             ".container",
             ".documentFirstHeading",
+            "#content",
         ]
 
         candidates = []
@@ -191,119 +272,98 @@ class RegioneERCollector(BaseCollector):
         fallback = soup.get_text(" ", strip=True)
         return re.sub(r"\s+", " ", fallback).strip()
 
-    def _build_summary(self, text: str, max_len: int = 600) -> str:
+    def _clean_title(self, title: str) -> str:
+        title = re.sub(r"\s+", " ", title).strip()
+        title = title.replace("—", "-")
+        return title
+
+    def _build_summary(self, text: str, max_len: int = 350) -> str:
+        text = re.sub(r"\s+", " ", text).strip()
+
+        for noise in [
+            "Briciole di pane",
+            "Home /",
+            "Vai al contenuto",
+            "Vai alla navigazione",
+        ]:
+            text = text.replace(noise, "")
+
         summary = text[:max_len].strip()
         if len(text) > max_len:
             summary += "..."
+
         return summary
 
-    def _extract_deadline(self, text: str, title: str, url: str) -> str | None:
-        content = f"{title} {text} {url}".lower()
+    def _extract_deadline(self, text: str, title: str, url: str) -> Optional[str]:
+        content = f"{title} {text} {url}"
+        lowered = content.lower()
 
-        if "chius" in content:
+        closed_patterns = [
+            "bando chiuso",
+            "chiuso",
+            "scaduto",
+            "scaduta",
+        ]
+
+        if any(k in lowered for k in closed_patterns):
             return "closed"
 
-        if "apert" in content or "in corso" in content:
+        month_names = (
+            "gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|"
+            "settembre|ottobre|novembre|dicembre"
+        )
+
+        patterns = [
+            rf"scadenza[^0-9]{{0,120}}(\d{{1,2}}\s+(?:{month_names})\s+\d{{4}})",
+            rf"entro[^0-9]{{0,120}}(\d{{1,2}}\s+(?:{month_names})\s+\d{{4}})",
+            rf"fino al[^0-9]{{0,120}}(\d{{1,2}}\s+(?:{month_names})\s+\d{{4}})",
+            rf"presentazione[^0-9]{{0,150}}(\d{{1,2}}\s+(?:{month_names})\s+\d{{4}})",
+            r"scadenza[^0-9]{0,120}(\d{1,2}/\d{1,2}/\d{4})",
+            r"entro[^0-9]{0,120}(\d{1,2}/\d{1,2}/\d{4})",
+            r"fino al[^0-9]{0,120}(\d{1,2}/\d{1,2}/\d{4})",
+            r"presentazione[^0-9]{0,150}(\d{1,2}/\d{1,2}/\d{4})",
+            r"scadenza[^0-9]{0,120}(\d{4}-\d{2}-\d{2})",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, lowered, flags=re.IGNORECASE)
+            if match:
+                return match.group(1)
+
+        if "in corso" in lowered or "apert" in lowered:
             return "open"
 
         return None
 
-    def _is_candidate_call_link(self, url: str, text: str) -> bool:
-        lowered_url = url.lower()
-        lowered_text = text.lower()
-        parsed = urlparse(url)
+    def _extract_budget(self, text: str) -> Optional[float]:
+        lowered = text.lower()
 
-        if lowered_url.startswith("mailto:"):
-            return False
-        if lowered_url.startswith("javascript:"):
-            return False
-        if parsed.fragment:
-            return False
-
-        if any(x in lowered_url for x in [
-            "facebook.com",
-            "api.whatsapp.com",
-            "t.me/share",
-            "linkedin.com",
-            "twitter.com",
-            "x.com",
-        ]):
-            return False
-
-        if "agricoltura.regione.emilia-romagna.it" not in lowered_url:
-            return False
-
-        excluded_fragments = [
-            "/newsletter",
-            "/accessibilita",
-            "/info",
-            "/crediti",
-            "/privacy",
-            "/cookie",
-            "/regolamenti",
-            "/cronoprogramma",
-            "/organismo-di-coordinamento-akis-regionale",
-            "/piano-strategico-nazionale-pac",
-            "/bandi-chiusi",
-            "/bandi-gal",
-            "/programma/comunicazione",
-            "/programma/comitato-di-monitoraggio",
-            "/programma/complemento-programmazione",
-            "/programma/interventi",
-            "/disposizioni-attuative-regionali/prezziario-opere-agricoltura",
-            "/disposizioni-attuative-regionali/costi-standard",
-            "/disposizioni-attuative-regionali/documenti-regionali",
-            "/disposizioni-attuative-regionali/delimitazioni",
-            "/disposizioni-attuative-regionali/check-lists",
-        ]
-        if any(x in lowered_url for x in excluded_fragments):
-            return False
-
-        excluded_texts = {
-            "",
-            "-",
-            "newsletter",
-            "telegram: share web page",
-            "compartilhe no whatsapp",
-            "vai al footer",
-            "vai alla navigazione",
-            "vai al contenuto",
-            "opportunità",
-            "bandi in corso",
-            "bandi",
-            "comunicazione",
-            "complemento di programmazione",
-            "interventi",
-            "regolamenti comunitari",
-            "prezziario per opere in agricoltura",
-            "costi standard",
-            "delimitazioni territoriali",
-            "comitato di monitoraggio",
-        }
-        if lowered_text in excluded_texts:
-            return False
-
-        positive = [
-            "intervento",
-            "srd",
-            "sra",
-            "srg",
-            "sre",
-            "investimenti",
-            "insediamento",
-            "giovani",
-            "agricoltori",
-            "forest",
-            "zootec",
+        patterns = [
+            r"dotazione finanziaria[^0-9]{0,100}([\d\.\,]+)\s*(?:euro|€)",
+            r"risorse[^0-9]{0,100}([\d\.\,]+)\s*(?:euro|€)",
+            r"budget[^0-9]{0,100}([\d\.\,]+)\s*(?:euro|€)",
         ]
 
-        if any(p in lowered_text for p in positive):
-            return True
+        for pattern in patterns:
+            match = re.search(pattern, lowered)
+            if not match:
+                continue
 
-        if any(p in lowered_url for p in positive):
-            return True
+            raw = match.group(1).replace(".", "").replace(",", ".")
+            try:
+                return float(raw)
+            except ValueError:
+                continue
 
-        return False
+        return None
+
+    # -------------------------
+    # VALIDATION
+    # -------------------------
+
+    def _has_bando_code(self, url: str, title: str, anchor_text: str) -> bool:
+        content = f"{url} {title} {anchor_text}".lower()
+        return bool(re.search(r"\b(sr[adhge]\d{1,2})\b", content))
 
     def _looks_like_real_call_page(self, url: str, title: str, text: str) -> bool:
         content = f"{url} {title} {text}".lower()
@@ -317,30 +377,39 @@ class RegioneERCollector(BaseCollector):
             "check lists",
             "delimitazioni",
             "documenti regionali",
+            "regolamenti comunitari",
         ]
+
         if any(w in content for w in weak_patterns):
             return False
 
         strong_patterns = [
+            "bando",
             "intervento",
             "srd",
             "sra",
             "srg",
+            "srh",
             "sre",
             "beneficiari",
             "spese ammissibili",
             "domande di sostegno",
             "contributo",
+            "contributi",
             "investimenti",
             "insediamento",
             "giovani agricoltori",
+            "sostegno",
+            "presentazione delle domande",
         ]
 
         return any(p in content for p in strong_patterns)
 
     def _build_call_id(self, url: str) -> str:
-        clean = re.sub(r"[^a-zA-Z0-9]+", "-", url).strip("-").upper()
-        return f"RER-{clean[:80]}"
+        parsed = urlparse(url)
+        slug = parsed.path.rstrip("/").split("/")[-1]
+        clean = re.sub(r"[^a-zA-Z0-9]+", "-", slug).strip("-").upper()
+        return f"RER-{clean[:90]}"
 
     def _infer_topics(self, text: str, title: str) -> List[str]:
         content = f"{title} {text}".lower()
@@ -360,6 +429,9 @@ class RegioneERCollector(BaseCollector):
             "sostenib": "sustainability",
             "forest": "forestry",
             "zootec": "livestock",
+            "biologico": "organic farming",
+            "trasformazione": "transformation",
+            "commercializzazione": "commercialization",
         }
 
         for key, topic in mapping.items():
@@ -370,3 +442,13 @@ class RegioneERCollector(BaseCollector):
             topics.append("regional funding")
 
         return topics
+
+    def _deduplicate(self, calls: List[FundingCall]) -> List[FundingCall]:
+        best = {}
+
+        for call in calls:
+            key = call.source_url
+            if key not in best:
+                best[key] = call
+
+        return list(best.values())

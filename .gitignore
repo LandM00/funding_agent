@@ -1,4 +1,23 @@
-funding_calls.db
-config.yaml
+# Python cache
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Logs
+logs/
+*.log
+
+# Local database
+funding_calls.db
+*.db
+
+# Local config / secrets
+config.yaml
+.env
+.streamlit/secrets.toml
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/

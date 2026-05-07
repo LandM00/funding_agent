@@ -5,13 +5,13 @@ from funding_agent.config import load_config
 from funding_agent.db import FundingDB
 from funding_agent.models import FundingCall
 from funding_agent.rules.visibility import should_show_call
-from funding_agent.classifiers.scoring import score_call
-from funding_agent.classifiers.explainer import build_why_relevant
+from funding_agent.classifiers.call_evaluator import evaluate_call
 from funding_agent.collectors.invitalia import InvitaliaCollector
 from funding_agent.collectors.invitalia_on import InvitaliaONCollector
 from funding_agent.collectors.regione_er import RegioneERCollector
 from funding_agent.collectors.eu_calls_api import EUCallsAPICollector
 from funding_agent.notifier.email_sender import send_email_notification
+
 
 def row_to_call(row) -> FundingCall:
     return FundingCall(
@@ -51,9 +51,10 @@ def run_crawl(config: dict) -> None:
         calls = collector.fetch()
 
         for call in calls:
-            call.relevance_score = score_call(call, config)
-            call.why_relevant = build_why_relevant(call)
-            
+            evaluation = evaluate_call(call, config)
+            call.relevance_score = evaluation["score"]
+            call.why_relevant = evaluation["why_relevant"]
+
         db.upsert_calls(calls)
         total_calls += len(calls)
 
@@ -75,13 +76,26 @@ def _score_label(score: float, record_type: str) -> str:
     return "· DEBOLE"
 
 
-def _print_rows(rows, only_calls_label: bool = False) -> None:
-    for row in rows:
-        print("\n" + "=" * 80)
+def _record_type_label(row) -> str:
+    record_type = row["record_type"]
 
-        score = float(row["relevance_score"])
+    if record_type == "hub":
+        return "HUB / pagina indice"
+    if record_type == "support_doc":
+        return "documento di supporto"
+
+    return "incentivo / call"
+
+
+def _print_rows(rows, config: dict, only_calls_label: bool = False) -> None:
+    for row in rows:
+        call = row_to_call(row)
+        evaluation = evaluate_call(call, config)
+
+        score = float(row["relevance_score"] or evaluation["score"])
         level = _score_label(score, row["record_type"])
 
+        print("\n" + "=" * 80)
         print(f"{level} | Score: {score}")
         print(f"Titolo: {row['title']}")
         print(f"Fonte: {row['source']}")
@@ -90,12 +104,25 @@ def _print_rows(rows, only_calls_label: bool = False) -> None:
         if only_calls_label:
             print("Tipo: incentivo / call")
         else:
-            if row["record_type"] == "hub":
-                print("Tipo: HUB / pagina indice")
-            elif row["record_type"] == "support_doc":
-                print("Tipo: documento di supporto")
-            else:
-                print("Tipo: incentivo / call")
+            print(f"Tipo: {_record_type_label(row)}")
+
+        print(f"Opportunity type: {evaluation['opportunity_type']}")
+        print(f"Strategia: {evaluation['strategy']}")
+        print(f"Decisione: {evaluation['decision']}")
+        print(f"Priorità: {evaluation['priority']}")
+        print(f"Timing: {evaluation['timing']}")
+        print(f"Azione consigliata: {evaluation['next_action']}")
+
+        fit = evaluation["fit"]
+        print(
+            "Fit breakdown: "
+            f"tecnico={fit['technical_fit']} | "
+            f"business={fit['business_fit']} | "
+            f"beneficiario={fit['applicant_fit']} | "
+            f"fattibilità={fit['feasibility']} | "
+            f"strategico={fit['strategic_value']} | "
+            f"timing={fit['timing_score']}"
+        )
 
         if row["opening_date"]:
             print(f"Apertura: {row['opening_date']}")
@@ -106,12 +133,11 @@ def _print_rows(rows, only_calls_label: bool = False) -> None:
         if row["call_id"]:
             print(f"Call ID: {row['call_id']}")
 
-        if row["why_relevant"]:
-            reasons = json.loads(row["why_relevant"])
-            if reasons:
-                print("Perché è rilevante:")
-                for reason in reasons:
-                    print(f" - {reason}")
+        reasons = evaluation["why_relevant"]
+        if reasons:
+            print("Perché è rilevante:")
+            for reason in reasons:
+                print(f" - {reason}")
 
         print(f"URL: {row['source_url']}")
 
@@ -131,7 +157,7 @@ def run_digest(config: dict, limit: int = 100) -> None:
         db.close()
         return
 
-    _print_rows(visible_rows[:limit], only_calls_label=False)
+    _print_rows(visible_rows[:limit], config=config, only_calls_label=False)
     db.close()
 
 
@@ -150,11 +176,16 @@ def run_digest_calls(config: dict, limit: int = 100) -> None:
         db.close()
         return
 
-    _print_rows(visible_rows[:limit], only_calls_label=True)
+    _print_rows(visible_rows[:limit], config=config, only_calls_label=True)
     db.close()
 
 
 def run_notify_email(config: dict, min_score: float = 6.0) -> None:
+    """
+    Invia solo nuove call non ancora notificate.
+    Dopo l'invio, marca le call come notificate.
+    Questo comando è per uso operativo reale.
+    """
     db = FundingDB(config["database"]["path"])
     rows = db.get_unnotified_real_calls(min_score=min_score)
 
@@ -174,11 +205,43 @@ def run_notify_email(config: dict, min_score: float = 6.0) -> None:
     db.close()
 
 
+def run_test_email(config: dict, limit: int = 5) -> None:
+    """
+    Invia una email di test usando le migliori call già presenti nel database.
+    Non marca le call come notificate.
+    Serve per testare layout, contenuto e credenziali email.
+    """
+    db = FundingDB(config["database"]["path"])
+    rows = db.get_top_real_calls(limit=limit * 5)
+
+    visible_rows = []
+    for row in rows:
+        call = row_to_call(row)
+        if should_show_call(call):
+            visible_rows.append(row)
+
+    if not visible_rows:
+        print("Nessuna call disponibile per testare l'email.")
+        db.close()
+        return
+
+    rows_to_send = visible_rows[:limit]
+
+    send_email_notification(config, rows_to_send)
+
+    print(
+        f"Email di test inviata con {len(rows_to_send)} call. "
+        "Le call NON sono state marcate come notificate."
+    )
+
+    db.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Funding Agent")
     parser.add_argument(
         "command",
-        choices=["crawl", "digest", "digest-calls", "notify-email"],
+        choices=["crawl", "digest", "digest-calls", "notify-email", "test-email"],
         nargs="?",
         default="crawl",
         help="Azione da eseguire",
@@ -187,13 +250,13 @@ def main() -> None:
         "--limit",
         type=int,
         default=30,
-        help="Numero massimo di record nel digest",
+        help="Numero massimo di record nel digest o nella email di test",
     )
     parser.add_argument(
         "--min-score",
         type=float,
         default=6.0,
-        help="Score minimo per le notifiche email",
+        help="Score minimo per le notifiche email operative",
     )
 
     args = parser.parse_args()
@@ -207,6 +270,8 @@ def main() -> None:
         run_digest_calls(config, limit=args.limit)
     elif args.command == "notify-email":
         run_notify_email(config, min_score=args.min_score)
+    elif args.command == "test-email":
+        run_test_email(config, limit=args.limit)
 
 
 if __name__ == "__main__":
