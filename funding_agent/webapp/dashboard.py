@@ -268,7 +268,7 @@ def render_metrics(df):
 
 
 def render_fit_breakdown(row):
-    st.markdown("#### Fit breakdown")
+    st.markdown("#### Fit breakdown (0-5)")
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Tecnico", row["Technical fit"])
@@ -352,7 +352,7 @@ def render_detail(row):
     st.markdown(f"### {row['Titolo']}")
 
     top1, top2, top3, top4 = st.columns(4)
-    top1.metric("Score", row["Score"])
+    top1.metric("Score (0-10)", row["Score"])
     top2.metric("Fit", row["Fit"])
     top3.metric("Decisione", row["Decision"])
     top4.metric("Priorità", row["Priority"])
