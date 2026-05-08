@@ -10,6 +10,10 @@ from funding_agent.collectors.invitalia import InvitaliaCollector
 from funding_agent.collectors.invitalia_on import InvitaliaONCollector
 from funding_agent.collectors.regione_er import RegioneERCollector
 from funding_agent.collectors.eu_calls_api import EUCallsAPICollector
+from funding_agent.collectors.emiliaromagna_startup import EmiliaRomagnaStartupCollector
+from funding_agent.collectors.incentivi_gov import IncentiviGovCollector
+from funding_agent.collectors.eic_eureka import EICEurekaCollector
+from funding_agent.collectors.space_opportunities import SpaceOpportunitiesCollector
 from funding_agent.notifier.email_sender import send_email_notification
 
 
@@ -43,6 +47,10 @@ def run_crawl(config: dict) -> None:
         InvitaliaONCollector(),
         RegioneERCollector(),
         EUCallsAPICollector(),
+        EmiliaRomagnaStartupCollector(),
+        IncentiviGovCollector(),
+        EICEurekaCollector(),
+        SpaceOpportunitiesCollector(),
     ]
 
     total_calls = 0
