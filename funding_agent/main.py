@@ -95,12 +95,60 @@ def _record_type_label(row) -> str:
     return "incentivo / call"
 
 
-def _print_rows(rows, config: dict, only_calls_label: bool = False) -> None:
+def _evaluate_visible_rows(rows, config: dict, only_real_calls: bool = False):
+    """
+    Converte le righe DB in valutazioni aggiornate.
+
+    Importante:
+    - non usa relevance_score salvato nel DB per digest/dashboard CLI;
+    - ricalcola score, strategy, decision e priority con il codice corrente;
+    - ordina in base allo score aggiornato.
+    """
+    evaluated_rows = []
+
     for row in rows:
         call = row_to_call(row)
-        evaluation = evaluate_call(call, config)
 
-        score = float(row["relevance_score"] or evaluation["score"])
+        if only_real_calls and call.record_type != "call":
+            continue
+
+        if only_real_calls:
+            if not should_show_call(call):
+                continue
+        else:
+            if call.record_type == "call" and not should_show_call(call):
+                continue
+
+        evaluation = evaluate_call(call, config)
+        score = float(evaluation["score"])
+
+        evaluated_rows.append(
+            {
+                "row": row,
+                "call": call,
+                "evaluation": evaluation,
+                "score": score,
+            }
+        )
+
+    evaluated_rows.sort(
+        key=lambda item: (
+            item["score"],
+            item["evaluation"].get("fit", {}).get("strategic_value", 0),
+            item["evaluation"].get("fit", {}).get("technical_fit", 0),
+        ),
+        reverse=True,
+    )
+
+    return evaluated_rows
+
+
+def _print_evaluated_rows(evaluated_rows, only_calls_label: bool = False) -> None:
+    for item in evaluated_rows:
+        row = item["row"]
+        evaluation = item["evaluation"]
+        score = float(item["score"])
+
         level = _score_label(score, row["record_type"])
 
         print("\n" + "=" * 80)
@@ -152,39 +200,33 @@ def _print_rows(rows, config: dict, only_calls_label: bool = False) -> None:
 
 def run_digest(config: dict, limit: int = 100) -> None:
     db = FundingDB(config["database"]["path"])
-    rows = db.get_top_calls(limit=limit)
 
-    visible_rows = []
-    for row in rows:
-        call = row_to_call(row)
-        if call.record_type != "call" or should_show_call(call):
-            visible_rows.append(row)
+    # Prendiamo più righe del limite perché poi riordiniamo con lo score aggiornato.
+    rows = db.get_top_calls(limit=limit * 5)
+    evaluated_rows = _evaluate_visible_rows(rows, config, only_real_calls=False)
 
-    if not visible_rows:
+    if not evaluated_rows:
         print("Nessun record presente nel database.")
         db.close()
         return
 
-    _print_rows(visible_rows[:limit], config=config, only_calls_label=False)
+    _print_evaluated_rows(evaluated_rows[:limit], only_calls_label=False)
     db.close()
 
 
 def run_digest_calls(config: dict, limit: int = 100) -> None:
     db = FundingDB(config["database"]["path"])
+
+    # Prendiamo più righe del limite perché poi riordiniamo con lo score aggiornato.
     rows = db.get_top_real_calls(limit=limit * 5)
+    evaluated_rows = _evaluate_visible_rows(rows, config, only_real_calls=True)
 
-    visible_rows = []
-    for row in rows:
-        call = row_to_call(row)
-        if should_show_call(call):
-            visible_rows.append(row)
-
-    if not visible_rows:
+    if not evaluated_rows:
         print("Nessuna call reale aperta o in apertura entro 6 mesi presente nel database.")
         db.close()
         return
 
-    _print_rows(visible_rows[:limit], config=config, only_calls_label=True)
+    _print_evaluated_rows(evaluated_rows[:limit], only_calls_label=True)
     db.close()
 
 
@@ -193,23 +235,28 @@ def run_notify_email(config: dict, min_score: float = 6.0) -> None:
     Invia solo nuove call non ancora notificate.
     Dopo l'invio, marca le call come notificate.
     Questo comando è per uso operativo reale.
+
+    Nota:
+    - dopo ogni crawl, il DB viene aggiornato con lo score corrente;
+    - qui ricalcoliamo comunque lo score per filtrare in modo coerente.
     """
     db = FundingDB(config["database"]["path"])
-    rows = db.get_unnotified_real_calls(min_score=min_score)
+    rows = db.get_unnotified_real_calls(min_score=0.0)
 
-    visible_rows = []
-    for row in rows:
-        call = row_to_call(row)
-        if should_show_call(call):
-            visible_rows.append(row)
+    evaluated_rows = _evaluate_visible_rows(rows, config, only_real_calls=True)
+    rows_to_send = [
+        item["row"]
+        for item in evaluated_rows
+        if item["score"] >= min_score
+    ]
 
-    if not visible_rows:
+    if not rows_to_send:
         print("Nessuna nuova call aperta o in apertura entro 6 mesi da notificare.")
         db.close()
         return
 
-    send_email_notification(config, visible_rows)
-    db.mark_calls_notified([row["source_url"] for row in visible_rows])
+    send_email_notification(config, rows_to_send)
+    db.mark_calls_notified([row["source_url"] for row in rows_to_send])
     db.close()
 
 
@@ -222,18 +269,14 @@ def run_test_email(config: dict, limit: int = 5) -> None:
     db = FundingDB(config["database"]["path"])
     rows = db.get_top_real_calls(limit=limit * 5)
 
-    visible_rows = []
-    for row in rows:
-        call = row_to_call(row)
-        if should_show_call(call):
-            visible_rows.append(row)
+    evaluated_rows = _evaluate_visible_rows(rows, config, only_real_calls=True)
 
-    if not visible_rows:
+    if not evaluated_rows:
         print("Nessuna call disponibile per testare l'email.")
         db.close()
         return
 
-    rows_to_send = visible_rows[:limit]
+    rows_to_send = [item["row"] for item in evaluated_rows[:limit]]
 
     send_email_notification(config, rows_to_send)
 

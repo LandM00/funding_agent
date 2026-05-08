@@ -38,6 +38,16 @@ def _text(call: FundingCall) -> str:
     ).lower()
 
 
+def _title_text(call: FundingCall) -> str:
+    return " ".join(
+        [
+            call.title or "",
+            call.program or "",
+            call.call_id or "",
+        ]
+    ).lower()
+
+
 def _has_any(text: str, keywords: list[str]) -> bool:
     return any(k.lower() in text for k in keywords)
 
@@ -144,8 +154,48 @@ def _timing_label(call: FundingCall) -> str:
     return "Lungo termine"
 
 
+def _is_generic_startup_title(title_text: str) -> bool:
+    generic_markers = [
+        "award",
+        "premio",
+        "call for idea",
+        "entrepreneurship world cup",
+        "innovation award",
+        "welfare che impresa",
+        "challenge",
+        "competition",
+        "contest",
+    ]
+
+    vertical_markers = [
+        "agritech",
+        "agroalimentare",
+        "agricoltura",
+        "greenhouse",
+        "serra",
+        "sensor",
+        "sensori",
+        "iot",
+        "ai",
+        "artificial intelligence",
+        "intelligenza artificiale",
+        "robotica",
+        "robotics",
+        "eic",
+        "horizon",
+        "eureka",
+        "eurostars",
+        "esa",
+        "space",
+        "spazio",
+    ]
+
+    return _has_any(title_text, generic_markers) and not _has_any(title_text, vertical_markers)
+
+
 def classify_call_strategy(call: FundingCall, score: float) -> dict:
     text = _text(call)
+    title_text = _title_text(call)
     opportunity_type = classify_opportunity_type(call)
     timing = _timing_label(call)
     nex_matches = _nex_core_matches(text)
@@ -167,7 +217,7 @@ def classify_call_strategy(call: FundingCall, score: float) -> dict:
     }:
         strategy = "STARTUP_BUSINESS_FUNDING"
 
-        if score >= 7.5:
+        if score >= 7.5 and not _is_generic_startup_title(title_text):
             decision = "EVALUATE"
             priority = "HIGH"
             next_action = "Analizzare requisiti, spese ammissibili e compatibilità con Neura GrowTech."
@@ -175,10 +225,14 @@ def classify_call_strategy(call: FundingCall, score: float) -> dict:
             decision = "MONITOR"
             priority = "MEDIUM"
             next_action = "Valutare requisiti e compatibilità con spin-off / startup."
-        else:
+        elif score >= 5.0:
             decision = "MONITOR_LOW"
             priority = "LOW"
             next_action = "Tenere in lista: utile come misura business, ma non verticale su NEX."
+        else:
+            decision = "IGNORE"
+            priority = "LOW"
+            next_action = "Basso fit per NEX: ignorare salvo interesse specifico."
 
     # ------------------------------------------------------------------
     # REGIONAL INVESTMENT - CROP / FARM / GREENHOUSE
@@ -190,7 +244,7 @@ def classify_call_strategy(call: FundingCall, score: float) -> dict:
             decision = "EVALUATE"
             priority = "HIGH"
             next_action = (
-                "Verificare subito beneficiari e spese ammissibili: può essere utile "
+                "Verificare beneficiari e spese ammissibili: può essere utile "
                 "per aziende pilota che acquistano o integrano NEX."
             )
         elif score >= 5.5:
@@ -319,7 +373,7 @@ def classify_call_strategy(call: FundingCall, score: float) -> dict:
             next_action = "Misura soft: non prioritaria per NEX."
 
     # ------------------------------------------------------------------
-    # EU / HORIZON / SPACE
+    # EU / HORIZON / EIC / EUROSTARS
     # ------------------------------------------------------------------
     elif opportunity_type in {
         "EU_RND_AGRIFOOD_DIGITAL",
@@ -361,10 +415,25 @@ def classify_call_strategy(call: FundingCall, score: float) -> dict:
     # ------------------------------------------------------------------
     elif opportunity_type == "SPACE_EXTREME_ENVIRONMENT":
         strategy = "SPACE_EXTREME_ENVIRONMENT"
-        decision = "MONITOR_STRATEGIC"
-        priority = "MEDIUM"
-        next_action = "Valutare come opportunità strategica per applicazioni NEX in ambienti estremi/spazio."
 
+        if score >= 6.5:
+            decision = "MONITOR_STRATEGIC"
+            priority = "HIGH"
+            next_action = (
+                "Valutare come opportunità strategica per applicazioni NEX in ambienti estremi/spazio; "
+                "fare un pre-screening tecnico e verificare eventuali partner."
+            )
+        elif score >= 4.8 or nex_matches >= 2:
+            decision = "MONITOR_STRATEGIC"
+            priority = "MEDIUM"
+            next_action = (
+                "Monitorare strategicamente: opportunità utile per traiettoria spazio/ambienti estremi, "
+                "ma non necessariamente candidatura immediata."
+            )
+        else:
+            decision = "MONITOR_LOW"
+            priority = "LOW"
+            next_action = "Tenere in radar spazio/ambienti estremi, ma senza azione immediata."
     # ------------------------------------------------------------------
     # FALLBACK
     # ------------------------------------------------------------------
@@ -397,12 +466,26 @@ def classify_call_strategy(call: FundingCall, score: float) -> dict:
         if decision in {"APPLY_NOW", "EVALUATE"}:
             priority = "HIGH"
             next_action = "Scadenza ravvicinata: verificare subito fattibilità reale."
+
         elif decision in {"MONITOR", "MONITOR_STRATEGIC"}:
-            priority = "HIGH"
-            next_action = (
-                "Scadenza ravvicinata: fare rapidamente un pre-screening, "
-                "oppure scartare se non ci sono beneficiari/partner pronti."
-            )
+            if score >= 6.2:
+                priority = "HIGH"
+                next_action = (
+                    "Scadenza ravvicinata: fare rapidamente un pre-screening, "
+                    "oppure scartare se non ci sono beneficiari/partner pronti."
+                )
+            elif score >= 5.0:
+                priority = "MEDIUM"
+                next_action = (
+                    "Scadenza ravvicinata ma fit non alto: controllare rapidamente solo se "
+                    "c'è un responsabile o un partner già pronto."
+                )
+            else:
+                priority = "LOW"
+                decision = "MONITOR_LOW"
+                next_action = (
+                    "Scadenza ravvicinata e fit basso: tenere traccia, ma non investire effort ora."
+                )
 
     if timing == "Scaduto":
         decision = "IGNORE"

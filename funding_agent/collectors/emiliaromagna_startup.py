@@ -274,6 +274,9 @@ class EmiliaRomagnaStartupCollector(BaseCollector):
             "contributi",
             "accelerazione",
             "incubazione",
+            "strumenti utili",
+            "tutti i settori",
+            "percorso di accelerazione",
         }
 
         return lowered in category_titles

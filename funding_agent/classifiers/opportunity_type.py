@@ -35,6 +35,22 @@ def _title_text(call: FundingCall) -> str:
     ).lower()
 
 
+def _source_program_text(call: FundingCall) -> str:
+    """
+    Testo affidabile per classificazioni ad alto rischio di falsi positivi.
+    Non include raw_text.
+    """
+    return " ".join(
+        [
+            call.title or "",
+            call.call_id or "",
+            call.program or "",
+            call.source or "",
+            call.source_url or "",
+        ]
+    ).lower()
+
+
 def _has_any(text: str, keywords: list[str]) -> bool:
     return any(k.lower() in text for k in keywords)
 
@@ -70,11 +86,13 @@ def _has_space_domain(text: str, call_id: str, program: str) -> bool:
         r"\bspace\b",
         r"\bspazio\b",
         r"\besa\b",
+        r"\basi\b",
         r"\bspaceport\b",
         r"\blunar\b",
         r"\bmoon\b",
         r"\bmars\b",
         r"\borbit\b",
+        r"\borbita\b",
         r"\bsatellite\b",
         r"\bcopernicus\b",
         r"\bspace farming\b",
@@ -85,9 +103,21 @@ def _has_space_domain(text: str, call_id: str, program: str) -> bool:
     return any(re.search(pattern, cleaned) for pattern in space_patterns)
 
 
+def _is_startup_source(source: str) -> bool:
+    return any(
+        marker in source
+        for marker in [
+            "emiliaromagnastartup",
+            "emilia romagna startup",
+            "emiliaromagnastartup",
+        ]
+    )
+
+
 def classify_opportunity_type(call: FundingCall) -> str:
     text = _text(call)
     title_text = _title_text(call)
+    reliable_text = _source_program_text(call)
 
     source = (call.source or "").lower()
     program = (call.program or "").lower()
@@ -104,14 +134,14 @@ def classify_opportunity_type(call: FundingCall) -> str:
     # ------------------------------------------------------------------
     # Questi record sono radar strategici, non call operative specifiche.
     # Li classifichiamo prima degli altri blocchi per evitare falsi match.
-    if "WATCH" in call_id or "watchlist" in text:
+    if "WATCH" in call_id or "watchlist" in title_text:
         if "EIC" in call_id:
             return "EU_DEEPTECH_SCALEUP"
 
         if "EUROSTARS" in call_id:
             return "EU_RND_CONSORTIUM"
 
-        if "SPACE" in call_id or _has_space_domain(text, call_id, program):
+        if "SPACE" in call_id or _has_space_domain(reliable_text, call_id, program):
             return "EU_SPACE"
 
         return "EU_RND_CONSORTIUM"
@@ -276,6 +306,73 @@ def classify_opportunity_type(call: FundingCall) -> str:
         return "REGIONAL_FUNDING"
 
     # ------------------------------------------------------------------
+    # EMILIA-ROMAGNA STARTUP / ART-ER
+    # ------------------------------------------------------------------
+    # Importante: per questa fonte usiamo soprattutto titolo/call_id/programma,
+    # perché il raw_text può contenere link correlati e generare falsi positivi.
+    if _is_startup_source(source):
+        if _has_any(
+            title_text,
+            [
+                "eic accelerator",
+                "eic transition",
+                "eic pathfinder",
+                "eic step",
+                "deep-tech",
+                "deep tech",
+            ],
+        ):
+            return "EU_DEEPTECH_SCALEUP"
+
+        if _has_any(
+            title_text,
+            [
+                "eurostars",
+                "eureka",
+                "open horizons",
+                "horizon europe",
+                "horizon",
+            ],
+        ):
+            # Se il titolo è esplicitamente spaziale, classifichiamo space.
+            if _has_space_domain(reliable_text, call_id, program):
+                return "EU_SPACE"
+            return "EU_RND_CONSORTIUM"
+
+        if _has_space_domain(reliable_text, call_id, program):
+            return "SPACE_EXTREME_ENVIRONMENT"
+
+        if _has_any(
+            title_text,
+            [
+                "smart&start",
+                "smart start",
+                "nuove imprese a tasso zero",
+                "startup",
+                "start-up",
+                "spin-off",
+                "spinoff",
+                "call for idea",
+                "call4startups",
+                "accelerazione",
+                "incubazione",
+                "award",
+                "premio",
+                "competition",
+                "entrepreneurship",
+            ],
+        ):
+            return "STARTUP_FUNDING"
+
+        if _has_any(title_text, ["formazione", "training"]):
+            return "TRAINING_COMMUNICATION"
+
+        if _has_any(title_text, ["promozione", "marketing"]):
+            return "MARKETING_PROMOTION"
+
+        return "STARTUP_FUNDING"
+
+    # ------------------------------------------------------------------
     # EU / HORIZON / EIC / EUROSTARS
     # ------------------------------------------------------------------
     if (
@@ -286,7 +383,7 @@ def classify_opportunity_type(call: FundingCall) -> str:
         or "eureka" in program
     ):
         if "EIC" in call_id or _has_any(
-            text,
+            title_text,
             [
                 "eic accelerator",
                 "eic transition",
@@ -297,12 +394,12 @@ def classify_opportunity_type(call: FundingCall) -> str:
         ):
             return "EU_DEEPTECH_SCALEUP"
 
-        if "EUROSTARS" in call_id or "eurostars" in text or "eureka" in program:
+        if "EUROSTARS" in call_id or "eurostars" in title_text or "eureka" in program:
             return "EU_RND_CONSORTIUM"
 
-        # Attenzione: qui usiamo _has_space_domain() per evitare falsi positivi
-        # come "data spaces", che non c'entrano con lo spazio.
-        if "SPACE" in call_id or _has_space_domain(text, call_id, program):
+        # Attenzione: qui usiamo reliable_text per evitare falsi positivi
+        # come "data spaces", menu laterali o contenuti correlati.
+        if "SPACE" in call_id or _has_space_domain(reliable_text, call_id, program):
             return "EU_SPACE"
 
         if "CL6" in call_id:
@@ -334,7 +431,7 @@ def classify_opportunity_type(call: FundingCall) -> str:
             return "EU_RND_AGRIFOOD_ENVIRONMENT"
 
         if "CL4" in call_id:
-            if _has_space_domain(text, call_id, program):
+            if _has_space_domain(reliable_text, call_id, program):
                 return "EU_SPACE"
 
             return "EU_RND_DIGITAL_INDUSTRY_SPACE"
@@ -342,10 +439,27 @@ def classify_opportunity_type(call: FundingCall) -> str:
         return "EU_RND_CONSORTIUM"
 
     # ------------------------------------------------------------------
+    # ESA / ASI / SPACE SOURCES
+    # ------------------------------------------------------------------
+    if _has_any(
+        source,
+        [
+            "esa",
+            "asi",
+            "space",
+            "european space agency",
+            "esa business applications",
+            "esa bic",
+        ],
+    ):
+        return "SPACE_EXTREME_ENVIRONMENT"
+
+    # ------------------------------------------------------------------
     # SPACE / EXTREME ENVIRONMENTS OUTSIDE HORIZON
     # ------------------------------------------------------------------
-    if _has_space_domain(text, call_id, program) or _has_any(
-        text,
+    # Qui usiamo reliable_text, non raw_text completo, per evitare falsi positivi.
+    if _has_space_domain(reliable_text, call_id, program) or _has_any(
+        title_text,
         [
             "extreme environment",
             "ambienti estremi",

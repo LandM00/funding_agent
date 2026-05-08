@@ -81,6 +81,67 @@ def _days_to_deadline(call: FundingCall) -> int | None:
     return (deadline - date.today()).days
 
 
+def _is_generic_startup_opportunity(
+    opportunity_type: str,
+    technical: float,
+    strategic: float,
+    text: str,
+) -> bool:
+    """
+    True quando una call è utile per startup/business, ma non è chiaramente
+    verticale su NEX, agritech, AI applicata, CEA, sensoristica, spazio o R&D strategica.
+    Serve a evitare che premi/challenge/incubatori generici risultino troppo prioritari.
+    """
+    if opportunity_type not in {
+        "STARTUP_FUNDING",
+        "NEW_COMPANY_FUNDING",
+        "NATIONAL_BUSINESS_FUNDING",
+    }:
+        return False
+
+    strategic_keywords = [
+        "agritech",
+        "agroalimentare",
+        "agriculture",
+        "agricoltura",
+        "greenhouse",
+        "serra",
+        "controlled environment",
+        "vertical farming",
+        "sensor",
+        "sensori",
+        "iot",
+        "monitoring",
+        "monitoraggio",
+        "artificial intelligence",
+        "intelligenza artificiale",
+        "machine learning",
+        "dss",
+        "decision support",
+        "automation",
+        "automazione",
+        "irrigation",
+        "irrigazione",
+        "fertigation",
+        "fertirrigazione",
+        "esa",
+        "asi",
+        "space",
+        "spazio",
+        "satellite",
+        "horizon",
+        "eic",
+        "eureka",
+        "eurostars",
+        "deep tech",
+        "deep-tech",
+    ]
+
+    has_strategic_keyword = _has_any(text, strategic_keywords)
+
+    return technical < 2.0 and strategic < 2.2 and not has_strategic_keyword
+
+
 def _get_profile(config: dict) -> dict:
     return config.get("project_profile", {}) or {}
 
@@ -131,12 +192,58 @@ def analyze_fit(call: FundingCall, config: dict) -> dict:
     # CORE NEX GROUPS
     # ------------------------------------------------------------------
     nex_groups = [
-        ["greenhouse", "serra", "controlled environment", "controlled environment agriculture", "vertical farming", "cea", "indoor farming", "fuori suolo"],
-        ["sensor", "sensori", "iot", "monitoraggio", "monitoring", "crop monitoring", "environmental observations"],
-        ["automation", "automazione", "autonomous", "controllo", "control", "robotics", "robotica"],
-        ["decision support", "decision support system", "dss", "artificial intelligence", "intelligenza artificiale", "ai", "machine learning"],
-        ["irrigation", "irrigazione", "fertigation", "fertirrigazione", "fertirrig"],
-        ["water saving", "risparmio idrico", "resource efficiency", "efficienza risorse", "fertilizer reduction", "riduzione fertilizzanti"],
+        [
+            "greenhouse",
+            "serra",
+            "controlled environment",
+            "controlled environment agriculture",
+            "vertical farming",
+            "cea",
+            "indoor farming",
+            "fuori suolo",
+        ],
+        [
+            "sensor",
+            "sensori",
+            "iot",
+            "monitoraggio",
+            "monitoring",
+            "crop monitoring",
+            "environmental observations",
+        ],
+        [
+            "automation",
+            "automazione",
+            "autonomous",
+            "controllo",
+            "control",
+            "robotics",
+            "robotica",
+        ],
+        [
+            "decision support",
+            "decision support system",
+            "dss",
+            "artificial intelligence",
+            "intelligenza artificiale",
+            "ai",
+            "machine learning",
+        ],
+        [
+            "irrigation",
+            "irrigazione",
+            "fertigation",
+            "fertirrigazione",
+            "fertirrig",
+        ],
+        [
+            "water saving",
+            "risparmio idrico",
+            "resource efficiency",
+            "efficienza risorse",
+            "fertilizer reduction",
+            "riduzione fertilizzanti",
+        ],
     ]
 
     nex_group_matches = _count_groups(text, nex_groups)
@@ -222,6 +329,11 @@ def analyze_fit(call: FundingCall, config: dict) -> dict:
     }:
         business += 2.4
 
+    elif opportunity_type == "SPACE_EXTREME_ENVIRONMENT":
+        # Non è business funding classico, ma ESA/ASI/BASS possono finanziare PoC,
+        # pilot, validazione e sviluppo applicativo.
+        business += 1.8
+
     elif opportunity_type in {
         "REGIONAL_DEMONSTRATION",
         "REGIONAL_KNOWLEDGE_TRANSFER",
@@ -244,10 +356,31 @@ def analyze_fit(call: FundingCall, config: dict) -> dict:
     }:
         business += 0.4
 
-    if _has_any(text, ["fondo perduto", "tasso zero", "finanziamento agevolato", "contributo", "grant", "sovvenzione"]):
+    if _has_any(
+        text,
+        [
+            "fondo perduto",
+            "tasso zero",
+            "finanziamento agevolato",
+            "contributo",
+            "grant",
+            "sovvenzione",
+        ],
+    ):
         business += 0.8
 
-    if _has_any(text, ["investimenti", "industrializzazione", "scale", "scalare", "commercializzazione", "impianti", "attrezzature"]):
+    if _has_any(
+        text,
+        [
+            "investimenti",
+            "industrializzazione",
+            "scale",
+            "scalare",
+            "commercializzazione",
+            "impianti",
+            "attrezzature",
+        ],
+    ):
         business += 0.5
 
     if _has_any(text, ["promozione", "marketing", "formazione", "informazione"]):
@@ -263,10 +396,32 @@ def analyze_fit(call: FundingCall, config: dict) -> dict:
     if any(t.lower() in text for t in target_applicant):
         applicant += 2.0
 
-    if _has_any(text, ["startup", "start-up", "spin-off", "spinoff", "pmi", "sme", "impresa innovativa", "micro e piccole imprese"]):
+    if _has_any(
+        text,
+        [
+            "startup",
+            "start-up",
+            "spin-off",
+            "spinoff",
+            "pmi",
+            "sme",
+            "impresa innovativa",
+            "micro e piccole imprese",
+        ],
+    ):
         applicant += 2.2
 
-    if _has_any(text, ["università", "university", "research organisation", "research organization", "organismi di ricerca", "centri di ricerca"]):
+    if _has_any(
+        text,
+        [
+            "università",
+            "university",
+            "research organisation",
+            "research organization",
+            "organismi di ricerca",
+            "centri di ricerca",
+        ],
+    ):
         applicant += 1.3
 
     if _has_any(text, ["aziende agricole", "agricoltori", "imprenditori agricoli", "imprese agricole"]):
@@ -296,8 +451,11 @@ def analyze_fit(call: FundingCall, config: dict) -> dict:
         "EU_RND_DIGITAL_INDUSTRY_SPACE",
         "EU_SPACE",
         "EU_RND_CONSORTIUM",
+        "EU_DEEPTECH_SCALEUP",
+        "SPACE_EXTREME_ENVIRONMENT",
     }:
-        # Horizon spesso richiede consorzi: buono per UniBo/partner, meno diretto per NGT.
+        # Opportunità strategiche UE/ESA/ASI: buone per UniBo, NGT o partner,
+        # ma spesso richiedono preparazione o consorzio.
         applicant += 0.8
 
     applicant = max(0.0, min(5.0, applicant))
@@ -330,6 +488,15 @@ def analyze_fit(call: FundingCall, config: dict) -> dict:
         "EU_RND_CONSORTIUM",
     }:
         feasibility -= 0.8
+
+    elif opportunity_type == "EU_DEEPTECH_SCALEUP":
+        # EIC/Eureka/scale-up sono strategici ma competitivi.
+        feasibility -= 0.4
+
+    elif opportunity_type == "SPACE_EXTREME_ENVIRONMENT":
+        # ESA/ASI sono meno immediate di una call startup nazionale,
+        # ma alcune sono open call/pilot abbastanza praticabili.
+        feasibility -= 0.2
 
     if _has_any(text, ["consortium", "consorzio", "partenariato europeo", "multi-actor"]):
         feasibility -= 0.7
@@ -394,7 +561,11 @@ def analyze_fit(call: FundingCall, config: dict) -> dict:
     elif opportunity_type in {"EU_SPACE", "EU_RND_DIGITAL_INDUSTRY_SPACE"}:
         strategic += 2.0
 
-    elif opportunity_type in {"EU_DEEPTECH_SCALEUP"}:
+    elif opportunity_type == "SPACE_EXTREME_ENVIRONMENT":
+        # Traiettoria strategica: ambienti estremi, spazio, ESA/ASI, space-enabled agritech.
+        strategic += 2.2
+
+    elif opportunity_type == "EU_DEEPTECH_SCALEUP":
         strategic += 2.0
 
     elif opportunity_type in {"REGIONAL_DEMONSTRATION", "REGIONAL_COOPERATION"}:
@@ -458,7 +629,9 @@ def analyze_fit(call: FundingCall, config: dict) -> dict:
         "NEW_COMPANY_FUNDING",
         "NATIONAL_BUSINESS_FUNDING",
     }:
-        final_score += 0.9
+        # Boost business, ma meno aggressivo: evita che call startup generiche
+        # superino opportunità davvero verticali su NEX.
+        final_score += 0.5
 
     if opportunity_type == "REGIONAL_INVESTMENT_CROP":
         final_score += 0.6
@@ -477,6 +650,9 @@ def analyze_fit(call: FundingCall, config: dict) -> dict:
     }:
         final_score += 0.6
 
+    if opportunity_type == "SPACE_EXTREME_ENVIRONMENT":
+        final_score += 0.5
+
     if opportunity_type in {
         "REGIONAL_INVESTMENT_LIVESTOCK",
         "REGIONAL_AGRI_ENVIRONMENT_LIVESTOCK",
@@ -492,6 +668,20 @@ def analyze_fit(call: FundingCall, config: dict) -> dict:
     # Evitiamo che superino bandi reali già aperti/candidabili.
     if is_watchlist:
         final_score = min(final_score, 6.4)
+
+    # Evita che call startup generiche risultino troppo alte se non hanno
+    # fit tecnico/strategico reale con NEX.
+    if _is_generic_startup_opportunity(opportunity_type, technical, strategic, text):
+        final_score = min(final_score, 5.9)
+
+    # Se è startup funding ma ha basso fit tecnico e strategico, resta monitorabile
+    # ma non deve diventare prioritaria.
+    if opportunity_type in {
+        "STARTUP_FUNDING",
+        "NEW_COMPANY_FUNDING",
+        "NATIONAL_BUSINESS_FUNDING",
+    } and technical < 1.0 and strategic < 1.5:
+        final_score = min(final_score, 6.0)
 
     final_score = round(max(0.0, min(10.0, final_score)), 1)
 
